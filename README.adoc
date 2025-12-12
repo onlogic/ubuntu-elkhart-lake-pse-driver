@@ -1,0 +1,340 @@
+# Ubuntu Elkhart Lake PSE Driver
+:source-highlighter: highlightjs
+:rouge-css: style
+:rouge-style: github
+:data-uri:
+
+A character driver for the K400/HX300 PSE over ISHTP
+
+The Elkhart Lake Programmable Services Engine can be managed over ISHTP/HECI from the host processor.
+
+This driver creates and manages a `pse` character device, which allows userspace applications to read and
+write data over the underlying ISHTP bus driver.
+
+## Prerequisites
+
+1. A Karbon 400-series or Helix 300-series system.
+2. An installation of https://ubuntu.com/download/iot/intel-iotg[Ubuntu for Intel IoT]
+
+IMPORTANT: The `pinctrl-elkhartlake` driver will timeout during startup and crash during shutdown, until a BIOS update
+is available that addresses the issue, it is recommended that you disable this driver module.
+(For example, add modprobe.blacklist=pinctrl-elkartlake to the kernel command line.)
+
+## Quickstart
+
+To build and install the pse kernel module automatically, simply run:
+
+[source, bash]
+$ sudo chmod +x install.sh && sudo ./install.sh
+
+This will build and install PSE kernel module with DKMK.
+If "PSE kernel module installed!" is shown, it is ready to use. Notice that the below step is required after every OS reboot, then the device can be opened for communication again.
+
+[source, bash]
+$ sudo modprobe pse
+
+If all goes well, you can move on to <<Usage>>
+
+## Kernel Upgrade
+
+It is also possible to upgrade Linux kernel by user. Most of time, the corresponding PSE kernel module can be automatic installed after reboot.
+
+[source, bash]
+$ uname -r
+$ sudo dkms status
+
+If no matched version's PSE installation can be found, please try to rebuild and reinstall by script.
+
+[source, bash]
+$ sudo chmod +x install.sh && sudo ./install.sh
+
+If "PSE kernel module installed!" has been shown, you can move on to <<Usage>>
+If "PSE kernel module installation failed!" and "Your kernel headers cannot be found" are shown, it is because the corresponding header cannot be found or the build packages have unmet dependencies. It is recommended to install another Linux kernel version.
+
+## Usage
+
+It is possible to interface with the PSE directly from your software
+stack by reading and writing to the PSE character file (`/dev/pse`). A complete example that establishes a connection
+to the PSE and reads the firmware version information is included in the `examples` directory, and can be built with:
+
+[source, bash]
+----
+$ cd examples
+$ sudo chmod +x examples.sh && sudo ./examples.sh
+----
+
+All source code referenced in the instructions below is included in full context in the `examples` directory. Additional example code is provided for using the CAN and DIO peripherals, as well as sample code for configuring the system's
+automotive features.
+
+### 1. Establish a Connection
+
+Before communication with the PSE can begin, the host client must establish a connection with the firmware client.
+This is performed by sending the 'client connection' IOCTL to the device file:
+
+.Connecting
+[cols="<.^1a,<.^1a"]
+|===
+| 
+[nomnoml, target=connecting, format=svg]
+....
+[<start> start] -> [<abstract> /dev/pse]
+
+[/dev/pse] - [<state> open]
+
+[open] -> connecting requires root [<choice> root?]
+
+[root?] -> Yes [<state> IOCTL: ISHTP Connect Client]
+[root?] No ->  [<end> end]
+
+[<reference> PSE SMHI UUID] -> [IOCTL: ISHTP Connect Client] 
+[IOCTL: ISHTP Connect Client] -> [Connection]
+....
+|
+[source, c]
+----
+/// ... int pse_client_connect(void)
+int fd, ret;
+struct ishtp_cc_data cc_data;
+
+/// Prep input connection data
+memcpy(&(cc_data.in_client_uuid), &pse_smhi_guid, sizeof(pse_smhi_guid));
+
+/// Open the pse character device (fails if not root)
+fd = open(PSE_CHRDEV, O_RDWR);
+if (fd <= 0) {
+    printf("Failed to open the pse device file\n");
+    return fd;
+}
+
+/// Send the connection IOCTL
+ret = ioctl(fd, IOCTL_ISHTP_CONNECT_CLIENT, &cc_data);
+if (ret) {
+    printf("Failed to connect to the PSE over ISHTP/HECI\n");
+    return ret;
+}
+
+/// Return the file descriptor for use
+return fd;
+----
+|===
+
+Once the connection has been established and returned, it is possible to send commands to the PSE.
+
+### 2. Send a Command
+
+Commands sent to the programmable services engine can either be header-only 'short' commands, or complete
+header + body 'long' commands.
+
+The header portion of the command is as 48-bit wide structure that is transmitted as raw data to the PSE:
+
+[wavedrom, target=header.svg, format=svg]
+....
+{signal: [
+  {name: 'bits', wave: 'x.1hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhx.'},
+  {name: 'data', wave: 'x.6...............................................x.', data: ['header']},
+  {name: 'send', wave: 'x.3.......x.......5.......6...............x.......x.', data: ['command', 'has next', 'argument']},
+  {name: 'recv', wave: 'x.3.......4.......5.......6...............7.......x.', data: ['command', 'is response', 'has next', 'argument', 'status']}
+]}
+....
+
+NOTE: When sending a command the `is response` and `status` bytes are ignored; these are only set by the firmware
+endpoint when sending data back to the host.
+
+The command header can be easily described as a packed struct in C:
+
+[source, c]
+----
+typedef struct {
+    // The command 'class' of this message 
+    uint8_t command;
+    // True when the message is a response from the PSE
+    bool is_response;
+    // If this command has follow-on body data
+    bool has_next;
+    // The packed command argument; exact data depends on the command
+    uint16_t argument;
+    // Status of the received command when responding; zero on success
+    uint8_t status;
+} __packed heci_header_t;
+----
+
+The possible valid system commands are enumerated by the `heci_command_id_t`, and include:
+
+[cols="2,1m,6", options="header"]
+.Valid Commands
+|===
+| Command     | Value | Description
+| System Info | 0x01  | Report the system firmware version number
+| Digital IO  | 0x02  | Set and read the system's digital IO and LEDs
+| UART        | 0x03  | Send data over an attached UART. Allows control of automotive features
+| CAN Bus     | 0x04  | Send and receive CAN messages
+| PWM         | 0x05  | Manage the Pulse Width Modulation of a DIO configured as PWM
+| I2C         | 0x06  | Send/receive I2C data (not recommended for end-user configuration)
+| QEP         | 0x07  | Configure a group of DIOs set as a Quadrature Encoder Peripheral
+|===
+
+The `argument` packing depends on this command, and is described by the `*_command_t` structures. 
+
+UART, I2C, PWM, and QEP all use a generic 'operation + device' scheme, while DIO and CAN have separate formats:
+
+[wavedrom, target=argpack.svg, format=svg]
+....
+{signal: [
+  {name: 'bits', wave: 'x.1hhhhhhhhhhhhhhhx.'},
+  {name: 'data', wave: 'x.6...............x.', data: ['argument']},
+  {name: 'gen',  wave: 'x.3.......4.......x.', data: ['operation', 'device']},
+  {name: 'dio',  wave: 'x.3.......4...5...x.', data: ['operation', 'device', 'pin number']},
+  {name: 'can',  wave: 'x.3..4..5.........x.', data: ['operation', 'device', 'argument (baudrate)']},
+]}
+....
+
+The 'body' portion of each command is described by another structure:
+
+[source, c]
+----
+typedef struct {
+    /// Indicates the format of the following data
+    heci_data_kind_t kind: 8;
+    /// Length, in bytes, of the data portion
+    uint32_t length;
+    uint32_t padding;
+    /// Packed message body data
+    uint8_t data[MAX_HECI_DATA_LEN];
+} __packed heci_body_t;
+----
+
+The actual data format depends on the command sent; the
+`can_send` example function in `examples/can.c` shows one method for populating message data.
+
+Once a message's `header` and optional `body` portions are prepared, sending the command is as simple as writing to
+the open PSE device:
+
+.Sending a Command
+[cols="<.^1a,<.^1a"]
+|===
+|
+[nomnoml, target=sencmd.svg, format=svg]
+....
+[<start> start] - [<state> send]
+
+[send] -> [<choice> short command?]
+
+[<abstract> /dev/pse] -- [Connection]
+
+[short command?] No -> [<state> send header]
+[short command?] Yes -> [<state> send header + body]
+
+[send header] -> [Connection]
+[send header + body] -> [Connection]
+
+[Connection] -> [<state> write]
+
+[write] -> [<end> end]
+....
+|
+[source, c]
+----
+/// pse_send_command(int fd, heci_command_id_t command, uint16_t data, heci_body_t * body)
+
+size_t len;
+
+/// Create the initial header
+heci_header_t header = {
+    .status = 0,
+    .is_response = 0,
+    .has_next = body != NULL ? 1 : 0,
+    .command = (uint8_t)command,
+    .argument = data
+};
+
+/// Copy the header into the transmit buffer
+memcpy(heci_tx_buffer, &header, sizeof(heci_header_t));
+
+/// Add a body to the command if one is present
+if (header.has_next) {
+    memcpy(heci_tx_buffer + sizeof(heci_header_t), body, sizeof(heci_body_t));
+
+    len = sizeof(heci_header_t) + sizeof(heci_body_t);
+} else {
+    len = sizeof(heci_header_t);
+}
+
+write(fd, heci_tx_buffer, len);
+----
+|===
+
+### 3. Read the Response
+
+Any message sent to the PSE will receive a response from the embedded controller. The response message format 
+is identical to the transmit format, and will always include the status of the last command received.
+
+Some commands (like reading a CAN message), will result in additional data being returned, as indicated by the
+`has_next` flag. Application code may check this flag to determine if it should continue reading data:
+
+.Reading the Response
+[cols="<.^1a,<.^2a"]
+|===
+|
+[nomnoml, target=readresp.svg, format=svg]
+....
+#padding: 12
+#spacing: 25
+[<abstract> /dev/pse] -- [Connection]
+[Connection] -> [<state> read header]
+[Connection] --> [<state> read body]
+
+[<start> start] - [<state> recv]
+[recv] -> [Connection]
+
+[read header] -> [<choice> has next?]
+
+[has next?] No -> [<end> exit]
+
+[has next?] -> Yes [read body]
+[read body] -> [exit]
+....
+|
+[source, c]
+----
+/// pse_read_response(int fd, heci_header_t *header, heci_body_t *body)
+
+/// NOTE: Some file preparation occurs here; check sample code
+
+/// Read the message header
+length = read(fd, data, sizeof(heci_header_t));
+if (length <= 0 \|\| length != sizeof(heci_header_t)) {
+    printf("Failed reading header from the pse file (%i)\n", length);
+    return length;
+}
+
+memcpy(header, data, sizeof(heci_header_t));
+
+/// If the header has followup data, read it
+if (header->has_next && !body) {
+    printf("Warning: Returned body data was dropped!\n");
+    return length;
+} else if (header->has_next) {
+    length = read(fd, data + sizeof(heci_header_t), sizeof(heci_body_t));
+    if (length <= 0 \|\| length != sizeof(heci_body_t)) {
+        printf("Failed reading body from the pse file (%i)\n", length);
+        return length;
+    } 
+
+    memcpy(body, data + sizeof(heci_header_t), sizeof(heci_body_t));
+
+    length = sizeof(heci_body_t) + sizeof(heci_header_t);
+} else {
+    length = sizeof(heci_header_t);
+}
+----
+|===
+
+### 4. Minimal Example
+
+In the provided sample code, the files `examples/pse.c` and `examples/pse.h` provide some helpful abstraction to
+simplify this process. For instance, reading the PSE firmware version can be performed with the following code:
+
+[source, c]
+----
+include::./examples/version.c[]
+----
