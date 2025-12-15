@@ -21,7 +21,7 @@ static int set_digital_output(int fd, uint8_t d_out_pin, bool state) {
     return pse_command_checked(fd, kHECI_IO_COMMAND, *(uint16_t *)&command, NULL, NULL);
 }
 
-static uint8_t get_digital_input(int fd, uint8_t d_in_pin) {
+static int get_digital_input(int fd, uint8_t d_in_pin) {
     // format correct io command struct for di operation
     io_command_t command = {
         .op = kIO_GetInfo,
@@ -32,9 +32,6 @@ static uint8_t get_digital_input(int fd, uint8_t d_in_pin) {
     // reception data structures
     heci_dio_info_t * dio_info;
     heci_body_t body;
- 
-    // init to -1 to indicate any errors
-    int pin = -1; 
 
     // issue command and get input
     int ret = pse_command_checked(fd, kHECI_IO_COMMAND, *(uint16_t *)&command, NULL, &body);
@@ -53,7 +50,6 @@ static uint8_t get_digital_input(int fd, uint8_t d_in_pin) {
 
 int main(void) {
     int fd;
-    int ret = 0;
     bool state = true;
 
     // init and open client connection
@@ -65,12 +61,11 @@ int main(void) {
     }
 
     // 16 total operations, GPIO high then low
-    int PIN_OPS = 16; 
-    uint8_t val, pin_idx;
-
-    for (int i = 0; i < PIN_OPS; ++i) {
+    const int8_t NUM_PINS = 8, PIN_OPS = NUM_PINS * 2;
+    int val;
+    for (uint8_t i = 0; i < PIN_OPS; ++i) {
         // loop indices 0-7 and reverse ouput state per loop
-        int pin_idx = i % 8;
+        int8_t pin_idx = i % NUM_PINS;
         if (pin_idx == 0) {
             state = !state;
         }
@@ -94,5 +89,5 @@ int main(void) {
     }
 
     close(fd);
-    return ret;
+    return 0;
 }

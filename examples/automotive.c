@@ -43,6 +43,8 @@ const char * g_config_long_names[kAM_NumAutomotiveConfigs] = {
 #define AMD_VERSION_GET "ver\r\a"
 #define AMD_MIN_VERSION  123
 
+// #define SET_SAMPLE_VALUES
+
 /// Get the automotive controller firmware version
 static int get_version(int fd, uint32_t * version) {
     int ret;
@@ -203,8 +205,8 @@ int main(void) {
     printf("Current Configuration:\n\n");
     ret = show_configuration(fd);
 
-    // Uncomment to program some configuration values:
-
+    // define SET_SAMPLE_VALUES above to program some configuration values:
+    #ifdef SET_SAMPLE_VALUES
     if (!ret) {
         // Set the shutdown timer to 20 seconds
         printf("Update Shutdown Timer:\n");
@@ -216,6 +218,7 @@ int main(void) {
         printf("Update Shutdown Voltage:\n");
         ret = set_configuration_checked(fd, kAM_ShutdownVoltage, 950);
     }
+    #endif
 
     close(fd);
 
