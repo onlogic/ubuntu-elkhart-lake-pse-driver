@@ -9,3 +9,6 @@ pse_example.out
 /.vscode/
 /.asciidoctor/
 README.html
+*.out
+*.exe
+*.bin
